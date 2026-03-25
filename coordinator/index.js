@@ -28,7 +28,7 @@ wss.on("connection", (ws) => {
             return ws.send(JSON.stringify({ error: "invalid json" }));
         }
 
-        handleWorkerMessages(data.type);
+        handleWorkerMessages(ws, data);
     });
 
 });
@@ -50,7 +50,7 @@ function getOrCreateId() {
 
 // Handlers
 // Mensajes de workers
-function handleWorkerMessages(type) {
+function handleWorkerMessages(ws, data) {
     switch (data.type) {
         case "register":
             handleRegister(ws, data);
