@@ -1,15 +1,20 @@
 const WebSocket = require("ws");
+const fs = require("fs");
+const http = require("http");
 
-const PORT = 3000;
+const PORT = process.argv[2] || 3000;
 const TIMEOUT = 5000;
+const ID_PATH = "./id";
+const ID = getOrCreateId();
 
 const wss = new WebSocket.Server({ port: PORT });
 
 let servers = {};
 let totalTimeouts = 0;
 
-console.log(`Coordinator WS corriendo en puerto ${PORT}`);
+console.log(`Coordinator WS corriendo en puerto ${PORT} con ID ${ID}. HTTP en puerto ${Number(PORT)+1000}`);
 
+// Manejo de mensajes
 wss.on("connection", (ws) => {
 
     ws.on("message", (msg) => {
@@ -46,14 +51,37 @@ wss.on("connection", (ws) => {
 
 });
 
-// Registrar el servidor
+// Helpers
+function isPrimary() {
+    return role === "PRIMARY";
+}
+
+function getOrCreateId() {
+    if (!fs.existsSync(ID_PATH)) {
+        const id = Math.floor(Math.random() * 10000);
+        fs.writeFileSync(ID_PATH, String(id));
+        return id;
+    }
+
+    return Number(fs.readFileSync(ID_PATH, "utf-8").trim());
+}
+
+// Handlers
+// Registrar
 function handleRegister(ws, data) {
     const { id, url } = data;
+
+    if (!isPrimary()) {
+        return ws.send(JSON.stringify({
+            type: "error",
+            data: { message: "server not primary" }
+        }));
+    }
 
     if (!id || !url) {
         return ws.send(JSON.stringify({
             type: "error",
-            message: "id and url required"
+            data: { message: "id and url required" }
         }));
     }
 
@@ -75,10 +103,17 @@ function handleRegister(ws, data) {
 function handlePulse(ws, data) {
     const { id } = data;
 
+    if (!isPrimary()) {
+        return ws.send(JSON.stringify({
+            type: "error",
+            data: { message: "server not primary" }
+        }));
+    }
+
     if (!servers[id]) {
         return ws.send(JSON.stringify({
             type: "error",
-            message: "server not registered"
+            data: { message: "server not registered" }
         }));
     }
 
@@ -86,7 +121,7 @@ function handlePulse(ws, data) {
 
     ws.send(JSON.stringify({
         type: "pulse_received",
-        id
+        data: { id } 
     }));
 }
 
@@ -100,7 +135,7 @@ function handleGetServers(ws) {
 
     ws.send(JSON.stringify({
         type: "servers",
-        data: activeServers
+        data: { activeServers }
     }));
 }
 
@@ -115,7 +150,7 @@ function handleGetMetrics(ws) {
     }));
 }
 
-// Timeout
+// Timeout de workers
 setInterval(() => {
     const now = Date.now();
 
@@ -127,3 +162,31 @@ setInterval(() => {
         }
     }
 }, 2000);
+
+// Server HTTP para peticiones internas
+const server = http.createServer((req, res) => {
+    // POST: /add-peer
+    if (req.method === "POST" && req.url === "/add-peer") {
+        return;
+    }
+
+    res.writeHead(404);
+    res.end();
+});
+
+server.listen(String(Number(PORT)+1000));
+
+// DEBUG
+const DEBUG_INTERVAL = 5000;
+
+function debugState() {
+    console.log({
+        ID,
+        role,
+        leaderId,
+        known: [...knownPeerUrls],
+        connected: [...peers.keys()]
+    });
+}
+
+setInterval(debugState, DEBUG_INTERVAL);
