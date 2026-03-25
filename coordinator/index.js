@@ -9,6 +9,7 @@ const ID = getOrCreateId();
 
 const wss = new WebSocket.Server({ port: PORT });
 
+let role = "UNKNOWN";
 let servers = {};
 let totalTimeouts = 0;
 
@@ -27,26 +28,7 @@ wss.on("connection", (ws) => {
             return ws.send(JSON.stringify({ error: "invalid json" }));
         }
 
-        switch (data.type) {
-
-            case "register":
-                handleRegister(ws, data);
-                break;
-
-            case "pulse":
-                handlePulse(ws, data);
-                break;
-
-            case "get_servers":
-                handleGetServers(ws);
-                break;
-
-            case "get_metrics":
-                handleGetMetrics(ws);
-                break;
-
-        }
-
+        handleWorkerMessages(data.type);
     });
 
 });
@@ -67,6 +49,27 @@ function getOrCreateId() {
 }
 
 // Handlers
+// Mensajes de workers
+function handeWorkerMessages(type) {
+    switch (data.type) {
+        case "register":
+            handleRegister(ws, data);
+            break;
+
+        case "pulse":
+            handlePulse(ws, data);
+            break;
+
+        case "get_servers":
+            handleGetServers(ws);
+            break;
+
+        case "get_metrics":
+            handleGetMetrics(ws);
+            break;
+    }
+}
+
 // Registrar
 function handleRegister(ws, data) {
     const { id, url } = data;
@@ -182,10 +185,7 @@ const DEBUG_INTERVAL = 5000;
 function debugState() {
     console.log({
         ID,
-        role,
-        leaderId,
-        known: [...knownPeerUrls],
-        connected: [...peers.keys()]
+        role
     });
 }
 
