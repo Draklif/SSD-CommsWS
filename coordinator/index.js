@@ -50,7 +50,7 @@ function getOrCreateId() {
 
 // Handlers
 // Mensajes de workers
-function handeWorkerMessages(type) {
+function handleWorkerMessages(type) {
     switch (data.type) {
         case "register":
             handleRegister(ws, data);
