@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coordinator Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+    <header>
+        <h1>Coordinator</h1>
+        <p class="muted">Recibe workers por WebSocket y expone su estado por HTTP.</p>
+    </header>
+
+    <section>
+        <h2>Servidores</h2>
+        <p class="muted">Se actualiza cada 2 s con peticiones HTTP <code>GET /status</code> (polling).</p>
+        <div id="servers" class="grid"></div>
+    </section>
+
+    <div class="cols">
+        <section>
+            <h2>WebSocket <span id="ws-status" class="pill bad">desconectado</span></h2>
+            <p class="muted">El navegador abre su propia conexión con el coordinator. Los eventos
+                <code>server_joined</code> y <code>server_left</code> llegan solos, sin pedirlos.</p>
+            <div class="row" id="ws-templates"><button id="ws-toggle">Conectar</button></div>
+            <textarea id="ws-message" rows="4">{ "type": "get_servers" }</textarea>
+            <div class="row"><button class="primary" id="ws-send">Enviar</button></div>
+            <div class="log" id="ws-log"></div>
+        </section>
+
+        <section>
+            <h2>HTTP</h2>
+            <p class="muted">Cada petición abre, responde y cierra. Útil para órdenes puntuales entre servidores.</p>
+            <div class="row" id="http-presets"></div>
+            <div class="row">
+                <select id="http-method"><option>GET</option><option>POST</option></select>
+                <input id="http-url">
+            </div>
+            <textarea id="http-body" rows="4" placeholder="Body JSON (solo POST)"></textarea>
+            <div class="row"><button class="primary" id="http-send">Enviar</button></div>
+            <pre id="http-response"></pre>
+        </section>
+    </div>
+</main>
+
+<script src="/common.js"></script>
+<script>
+    const COORDINATOR_HTTP = location.origin;
+    const COORDINATOR_WS = `ws://${location.host}`;
+
+    let workers = []; // último listado del coordinator
+    const workerUrl = () => workers[0]?.url || "http://localhost:4000";
+
+    // ---------- Servidores (HTTP polling) ----------
+    async function refresh() {
+        let coord;
+        try {
+            coord = await getJson(`${COORDINATOR_HTTP}/status`);
+        } catch {
+            $("servers").innerHTML = card("Coordinator", COORDINATOR_HTTP, false, {});
+            return;
+        }
+        workers = coord.servers;
+
+        const workerCards = await Promise.all(coord.servers.map(async (s) => {
+            try {
+                const w = await getJson(`${s.url}/status`);
+                return card("Worker", s.url, true, {
+                    ID: w.id,
+                    WebSocket: w.connected ? "conectado" : "desconectado",
+                    Coordinator: w.coordinator,
+                    "Último pulso": ago(s.lastHeartbeat),
+                }, `<a href="${esc(s.url)}" target="_blank">Abrir dashboard</a>
+                    <button data-change="${esc(s.url)}">Cambiar coordinator…</button>`);
+            } catch {
+                return card("Worker", s.url, false, { ID: s.id, Error: "no responde por HTTP" });
+            }
+        }));
+
+        $("servers").innerHTML =
+            card("Coordinator", COORDINATOR_HTTP, true, {
+                ID: coord.id,
+                Rol: coord.role,
+                "Workers activos": coord.servers.length,
+                Timeouts: coord.totalTimeouts,
+            }) + (workerCards.join("") || `<p class="muted">Ningún worker registrado.</p>`);
+    }
+
+    $("servers").addEventListener("click", (e) => {
+        const url = e.target.dataset.change;
+        if (url) fillHttp("POST", `${url}/change-coordinator`, { newCoordinatorUrl: COORDINATOR_WS });
+    });
+
+    refresh();
+    setInterval(refresh, 2000);
+
+    // ---------- WebSocket (navegador <-> coordinator) ----------
+    let ws;
+
+    function log(arrow, text) {
+        const line = document.createElement("div");
+        line.textContent = `${time()} ${arrow} ${text}`;
+        $("ws-log").prepend(line);
+        while ($("ws-log").childElementCount > 100) $("ws-log").lastChild.remove();
+    }
+
+    function setWsStatus(open) {
+        $("ws-status").textContent = open ? "conectado" : "desconectado";
+        $("ws-status").className = `pill ${open ? "ok" : "bad"}`;
+        $("ws-toggle").textContent = open ? "Desconectar" : "Conectar";
+    }
+
+    function wsConnect() {
+        ws = new WebSocket(COORDINATOR_WS);
+        ws.onopen = () => { setWsStatus(true); log("•", `conectado a ${COORDINATOR_WS}`); };
+        ws.onclose = () => { setWsStatus(false); log("•", "conexión cerrada"); };
+        ws.onmessage = (e) => log("↓", e.data);
+    }
+
+    $("ws-toggle").onclick = () => (ws?.readyState === WebSocket.OPEN ? ws.close() : wsConnect());
+
+    $("ws-send").onclick = () => {
+        if (ws?.readyState !== WebSocket.OPEN) return log("!", "no hay conexión abierta");
+        const text = $("ws-message").value;
+        ws.send(text); // se envía tal cual, para poder probar también JSON inválido
+        log("↑", text.replace(/\s+/g, " "));
+    };
+
+    const WS_TEMPLATES = {
+        get_servers: { type: "get_servers" },
+        get_metrics: { type: "get_metrics" },
+        register: { type: "register", data: { id: "dashboard-test", url: "http://localhost:9999" } },
+        pulse: { type: "pulse", data: { id: "dashboard-test" } },
+    };
+    addButtons($("ws-templates"), Object.fromEntries(Object.entries(WS_TEMPLATES).map(
+        ([name, message]) => [name, () => ($("ws-message").value = JSON.stringify(message, null, 2))]
+    )));
+
+    wsConnect();
+
+    // ---------- HTTP ----------
+    setupHttpConsole({
+        "GET coordinator /status": () => ["GET", `${COORDINATOR_HTTP}/status`],
+        "GET worker /status": () => ["GET", `${workerUrl()}/status`],
+        "POST worker /change-coordinator": () =>
+            ["POST", `${workerUrl()}/change-coordinator`, { newCoordinatorUrl: COORDINATOR_WS }],
+    });
+</script>
+</body>
+</html>

@@ -1,36 +1,35 @@
-// Coordinator: recibe workers por WebSocket y expone su estado por HTTP.
+// Coordinator: recibe workers por WebSocket, expone su estado por HTTP
+// y sirve el dashboard en http://localhost:<COORDINATOR_PORT>.
 // HTTP y WebSocket comparten el mismo puerto.
 //
-// Uso: node coordinator/index.js [--port 3000] [--role PRIMARY]
+// Configuración: variables de entorno, cargadas desde .env (ver .env.example).
 
+const path = require("node:path");
 const express = require("express");
+const cors = require("cors");
 const { WebSocketServer } = require("ws");
-const { parseArgs } = require("node:util");
 
-const { values: args } = parseArgs({
-    options: {
-        port: { type: "string", default: "3000" },
-        role: { type: "string", default: "PRIMARY" },
-    },
-});
-
-const PORT = Number(args.port);
+const PORT = Number(process.env.COORDINATOR_PORT || 3000);
+const TIMEOUT = Number(process.env.HEARTBEAT_TIMEOUT || 5000);
 const ID = Math.floor(Math.random() * 10000);
-const TIMEOUT = 5000;
 
-let role = args.role;
+let role = process.env.COORDINATOR_ROLE || "PRIMARY";
 const servers = {}; // id -> { id, url, lastHeartbeat }
 let totalTimeouts = 0;
 
 // ---------- HTTP ----------
 const app = express();
+app.use(cors()); // el dashboard de cada worker (otro origen) consulta /status desde el navegador
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public"))); // dashboard
+app.use(express.static(path.join(__dirname, "..", "dashboard"))); // estilos y JS compartidos
 
 app.get("/status", (req, res) => {
     res.json({ id: ID, role, servers: Object.values(servers), totalTimeouts });
 });
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, (err) => {
+    if (err) throw err; // p. ej. puerto ocupado
     console.log(`Coordinator ${ID} (${role}) en http://localhost:${PORT} y ws://localhost:${PORT}`);
 });
 
@@ -55,7 +54,13 @@ wss.on("connection", (ws) => {
 
 // Todos los mensajes tienen la forma { type, data }
 function send(ws, type, data = {}) {
-    ws.send(JSON.stringify({ type, data }));
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type, data }));
+}
+
+// Envía un mensaje a todos los clientes conectados (workers y dashboards).
+// Esto es lo que HTTP no puede hacer: el servidor habla sin que le pregunten.
+function broadcast(type, data) {
+    for (const client of wss.clients) send(client, type, data);
 }
 
 const handlers = {
@@ -66,6 +71,7 @@ const handlers = {
         servers[id] = { id, url, lastHeartbeat: Date.now() };
         console.log(`Servidor registrado: ${id} -> ${url}`);
         send(ws, "registered", { id });
+        broadcast("server_joined", { id, url });
     },
 
     pulse(ws, { id }) {
@@ -94,6 +100,7 @@ setInterval(() => {
             console.log(`Servidor eliminado por timeout: ${id}`);
             delete servers[id];
             totalTimeouts++;
+            broadcast("server_left", { id });
         }
     }
 }, 2000);

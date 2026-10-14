@@ -1,29 +1,30 @@
 // Worker: se conecta al coordinator por WebSocket, se registra y envía pulsos.
-// Expone su estado por HTTP.
+// Expone su estado por HTTP y sirve su dashboard en http://localhost:<WORKER_PORT>.
 //
-// Uso: node worker/index.js [--port 4000] [--coordinator ws://localhost:3000] [--public-url http://localhost:4000]
+// Configuración: variables de entorno, cargadas desde .env (ver .env.example).
 
+const path = require("node:path");
 const express = require("express");
+const cors = require("cors");
 const WebSocket = require("ws");
 const crypto = require("node:crypto");
-const { parseArgs } = require("node:util");
 
-const { values: args } = parseArgs({
-    options: {
-        port: { type: "string", default: "4000" },
-        coordinator: { type: "string", default: "ws://localhost:3000" },
-        "public-url": { type: "string" },
-    },
-});
-
-const PORT = Number(args.port);
-const PUBLIC_URL = args["public-url"] || `http://localhost:${PORT}`;
-const PULSE_INTERVAL = 2000;
-const RECONNECT_DELAY = 3000;
+const PORT = Number(process.env.WORKER_PORT || 4000);
+const PUBLIC_URL = process.env.WORKER_PUBLIC_URL || `http://localhost:${PORT}`;
+const PULSE_INTERVAL = Number(process.env.PULSE_INTERVAL || 2000);
+const RECONNECT_DELAY = Number(process.env.RECONNECT_DELAY || 3000);
 const id = crypto.randomUUID();
 
-let coordinatorUrl = args.coordinator;
+let coordinatorUrl = process.env.COORDINATOR_URL || "ws://localhost:3000";
 let ws;
+
+// Últimos mensajes con el coordinator, para mostrarlos en el dashboard
+const messages = [];
+
+function record(arrow, text) {
+    messages.push({ time: Date.now(), arrow, text });
+    if (messages.length > 200) messages.shift();
+}
 
 // ---------- WebSocket ----------
 function connect() {
@@ -32,10 +33,12 @@ function connect() {
 
     ws.on("open", () => {
         console.log("Conectado al coordinator");
+        record("•", `conectado a ${coordinatorUrl}`);
         send("register", { id, url: PUBLIC_URL });
     });
 
     ws.on("message", (raw) => {
+        record("↓", raw.toString());
         const msg = JSON.parse(raw);
         if (msg.type !== "pulse_received") console.log("Coordinator dice:", msg);
     });
@@ -43,6 +46,7 @@ function connect() {
     // Si se cae la conexión (o el coordinator aún no arranca), reintenta
     ws.on("close", () => {
         console.log(`Conexión cerrada, reintentando en ${RECONNECT_DELAY / 1000}s`);
+        record("•", "conexión cerrada");
         setTimeout(connect, RECONNECT_DELAY);
     });
 
@@ -51,17 +55,44 @@ function connect() {
 
 // Todos los mensajes tienen la forma { type, data }
 function send(type, data) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, data }));
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const text = JSON.stringify({ type, data });
+    ws.send(text);
+    record("↑", text);
 }
 
 setInterval(() => send("pulse", { id }), PULSE_INTERVAL);
 
 // ---------- HTTP ----------
 const app = express();
+app.use(cors()); // el dashboard del coordinator (otro origen) llama a este worker desde el navegador
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public"))); // dashboard
+app.use(express.static(path.join(__dirname, "..", "dashboard"))); // estilos y JS compartidos
 
 app.get("/status", (req, res) => {
-    res.json({ id, status: "alive", coordinator: coordinatorUrl, timestamp: Date.now() });
+    res.json({
+        id,
+        url: PUBLIC_URL,
+        status: "alive",
+        connected: ws.readyState === WebSocket.OPEN,
+        coordinator: coordinatorUrl,
+        timestamp: Date.now(),
+    });
+});
+
+app.get("/messages", (req, res) => {
+    res.json(messages);
+});
+
+// Envía un mensaje al coordinator por el WebSocket de este worker
+app.post("/send", (req, res) => {
+    const { type, data } = req.body || {};
+    if (!type) return res.status(400).json({ error: "type is required" });
+    if (ws.readyState !== WebSocket.OPEN) return res.status(409).json({ error: "not connected to coordinator" });
+
+    send(type, data);
+    res.json({ sent: { type, data } });
 });
 
 app.post("/change-coordinator", (req, res) => {
@@ -75,7 +106,8 @@ app.post("/change-coordinator", (req, res) => {
     res.json({ message: "Coordinator cambiado", currentCoordinator: coordinatorUrl });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, (err) => {
+    if (err) throw err; // p. ej. puerto ocupado: no registrarse con una URL que no es nuestra
     console.log(`Worker ${id} en http://localhost:${PORT}`);
     connect();
 });

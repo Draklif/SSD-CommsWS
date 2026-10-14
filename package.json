@@ -5,14 +5,15 @@
   "description": "Template de comunicación entre servidores con WebSockets y HTTP (coordinator + workers)",
   "scripts": {
     "start": "concurrently -n coord,worker -c blue,green \"npm:coordinator\" \"npm:worker\"",
-    "dev": "concurrently -n coord,worker -c blue,green \"node --watch coordinator/index.js\" \"node --watch worker/index.js\"",
-    "coordinator": "node coordinator/index.js",
-    "worker": "node worker/index.js"
+    "dev": "concurrently -n coord,worker -c blue,green \"node --watch --env-file-if-exists=.env coordinator/index.js\" \"node --watch --env-file-if-exists=.env worker/index.js\"",
+    "coordinator": "node --env-file-if-exists=.env coordinator/index.js",
+    "worker": "node --env-file-if-exists=.env worker/index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.9"
   },
   "dependencies": {
+    "cors": "^2.8.6",
     "express": "^5.3.0",
     "ws": "^8.22.0"
   },

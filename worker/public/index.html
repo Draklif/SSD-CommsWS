@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worker Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+    <header>
+        <h1>Worker</h1>
+        <p class="muted">Se conecta al coordinator por WebSocket, se registra y envía pulsos.</p>
+    </header>
+
+    <section>
+        <h2>Servidores</h2>
+        <p class="muted">Se actualiza cada 2 s con peticiones HTTP <code>GET /status</code> (polling).</p>
+        <div id="servers" class="grid"></div>
+    </section>
+
+    <div class="cols">
+        <section>
+            <h2>WebSocket worker ↔ coordinator</h2>
+            <p class="muted">Mensajes que este worker intercambia con el coordinator. El navegador no abre un
+                WebSocket: lee el historial con <code>GET /messages</code> y envía con <code>POST /send</code>,
+                y el worker lo reenvía por su propia conexión.</p>
+            <div class="row" id="ws-templates"></div>
+            <textarea id="ws-message" rows="4">{ "type": "get_servers" }</textarea>
+            <div class="row">
+                <button class="primary" id="ws-send">Enviar</button>
+                <label><input type="checkbox" id="show-pulses" checked> Mostrar pulsos</label>
+                <span id="ws-send-error" class="bad"></span>
+            </div>
+            <div class="log" id="ws-log"></div>
+        </section>
+
+        <section>
+            <h2>HTTP</h2>
+            <p class="muted">Cada petición abre, responde y cierra. Útil para órdenes puntuales entre servidores.</p>
+            <div class="row" id="http-presets"></div>
+            <div class="row">
+                <select id="http-method"><option>GET</option><option>POST</option></select>
+                <input id="http-url">
+            </div>
+            <textarea id="http-body" rows="4" placeholder="Body JSON (solo POST)"></textarea>
+            <div class="row"><button class="primary" id="http-send">Enviar</button></div>
+            <pre id="http-response"></pre>
+        </section>
+    </div>
+</main>
+
+<script src="/common.js"></script>
+<script>
+    const WORKER_HTTP = location.origin;
+
+    let worker = {}; // último /status de este worker
+    // ws://host:3000 -> http://host:3000 (el coordinator sirve HTTP y WS en el mismo puerto)
+    const coordinatorHttp = () => (worker.coordinator || "ws://localhost:3000").replace(/^ws/, "http");
+
+    // ---------- Servidores (HTTP polling) ----------
+    async function refresh() {
+        try {
+            worker = await getJson(`${WORKER_HTTP}/status`);
+        } catch {
+            $("servers").innerHTML = card("Worker", WORKER_HTTP, false, {});
+            return;
+        }
+
+        const workerCard = card("Worker (este)", worker.url, true, {
+            ID: worker.id,
+            WebSocket: worker.connected ? "conectado" : "desconectado",
+            Coordinator: worker.coordinator,
+        });
+
+        let coordCard;
+        try {
+            const coord = await getJson(`${coordinatorHttp()}/status`);
+            const me = coord.servers.find((s) => s.id === worker.id);
+            coordCard = card("Coordinator", coordinatorHttp(), true, {
+                ID: coord.id,
+                Rol: coord.role,
+                "Este worker": me ? `registrado, último pulso ${ago(me.lastHeartbeat)}` : "no registrado",
+            }, `<a href="${esc(coordinatorHttp())}" target="_blank">Abrir dashboard</a>`);
+        } catch {
+            coordCard = card("Coordinator", coordinatorHttp(), false, { Error: "no responde por HTTP" });
+        }
+
+        $("servers").innerHTML = workerCard + coordCard;
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+
+    // ---------- WebSocket (a través del worker) ----------
+    async function refreshMessages() {
+        let messages;
+        try {
+            messages = await getJson(`${WORKER_HTTP}/messages`);
+        } catch {
+            return;
+        }
+
+        const showPulses = $("show-pulses").checked;
+        $("ws-log").textContent = messages
+            .filter((m) => showPulses || !/"type":"pulse(_received)?"/.test(m.text))
+            .reverse()
+            .map((m) => `${time(m.time)} ${m.arrow} ${m.text}`)
+            .join("\n");
+    }
+
+    refreshMessages();
+    setInterval(refreshMessages, 1000);
+    $("show-pulses").onchange = refreshMessages;
+
+    $("ws-send").onclick = async () => {
+        const res = await fetch(`${WORKER_HTTP}/send`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: $("ws-message").value,
+        });
+        $("ws-send-error").textContent = res.ok ? "" : `${res.status} ${await res.text()}`;
+        refreshMessages();
+    };
+
+    // Las plantillas usan el id y la url reales de este worker
+    const WS_TEMPLATES = {
+        get_servers: () => ({ type: "get_servers" }),
+        get_metrics: () => ({ type: "get_metrics" }),
+        register: () => ({ type: "register", data: { id: worker.id, url: worker.url } }),
+        pulse: () => ({ type: "pulse", data: { id: worker.id } }),
+    };
+    addButtons($("ws-templates"), Object.fromEntries(Object.entries(WS_TEMPLATES).map(
+        ([name, message]) => [name, () => ($("ws-message").value = JSON.stringify(message(), null, 2))]
+    )));
+
+    // ---------- HTTP ----------
+    setupHttpConsole({
+        "GET worker /status": () => ["GET", `${WORKER_HTTP}/status`],
+        "POST worker /change-coordinator": () =>
+            ["POST", `${WORKER_HTTP}/change-coordinator`, { newCoordinatorUrl: worker.coordinator || "ws://localhost:3000" }],
+        "POST worker /send": () => ["POST", `${WORKER_HTTP}/send`, { type: "get_metrics" }],
+        "GET coordinator /status": () => ["GET", `${coordinatorHttp()}/status`],
+    });
+</script>
+</body>
+</html>
