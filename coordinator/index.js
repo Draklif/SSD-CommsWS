@@ -2,18 +2,31 @@
 // y sirve el dashboard en http://localhost:<COORDINATOR_PORT>.
 // HTTP y WebSocket comparten el mismo puerto.
 //
-// Configuración: variables de entorno, cargadas desde .env (ver .env.example).
+// Configuración (en orden de prioridad):
+//   1. Parámetros:  npm run coordinator -- --port 3001 --role PRIMARY
+//                   npm run coordinator 3001          (atajo: solo el puerto)
+//   2. Variables de entorno, cargadas desde .env (ver .env.example)
+//   3. Valores por defecto
 
 const path = require("node:path");
+const { parseArgs } = require("node:util");
 const express = require("express");
 const cors = require("cors");
 const { WebSocketServer } = require("ws");
 
-const PORT = Number(process.env.COORDINATOR_PORT || 3000);
+const { values: args, positionals } = parseArgs({
+    allowPositionals: true,
+    options: {
+        port: { type: "string" },
+        role: { type: "string" },
+    },
+});
+
+const PORT = Number(args.port || positionals[0] || process.env.COORDINATOR_PORT || 3000);
 const TIMEOUT = Number(process.env.HEARTBEAT_TIMEOUT || 5000);
 const ID = Math.floor(Math.random() * 10000);
 
-let role = process.env.COORDINATOR_ROLE || "PRIMARY";
+let role = args.role || process.env.COORDINATOR_ROLE || "PRIMARY";
 const servers = {}; // id -> { id, url, lastHeartbeat }
 let totalTimeouts = 0;
 

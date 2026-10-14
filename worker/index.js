@@ -1,21 +1,35 @@
 // Worker: se conecta al coordinator por WebSocket, se registra y envía pulsos.
 // Expone su estado por HTTP y sirve su dashboard en http://localhost:<WORKER_PORT>.
 //
-// Configuración: variables de entorno, cargadas desde .env (ver .env.example).
+// Configuración (en orden de prioridad):
+//   1. Parámetros:  npm run worker -- --port 4001 --coordinator ws://localhost:3001 --public-url http://localhost:4001
+//                   npm run worker 4001 ws://localhost:3001     (atajo: puerto y coordinator)
+//   2. Variables de entorno, cargadas desde .env (ver .env.example)
+//   3. Valores por defecto
 
 const path = require("node:path");
+const { parseArgs } = require("node:util");
 const express = require("express");
 const cors = require("cors");
 const WebSocket = require("ws");
 const crypto = require("node:crypto");
 
-const PORT = Number(process.env.WORKER_PORT || 4000);
-const PUBLIC_URL = process.env.WORKER_PUBLIC_URL || `http://localhost:${PORT}`;
+const { values: args, positionals } = parseArgs({
+    allowPositionals: true,
+    options: {
+        port: { type: "string" },
+        coordinator: { type: "string" },
+        "public-url": { type: "string" },
+    },
+});
+
+const PORT = Number(args.port || positionals[0] || process.env.WORKER_PORT || 4000);
+const PUBLIC_URL = args["public-url"] || process.env.WORKER_PUBLIC_URL || `http://localhost:${PORT}`;
 const PULSE_INTERVAL = Number(process.env.PULSE_INTERVAL || 2000);
 const RECONNECT_DELAY = Number(process.env.RECONNECT_DELAY || 3000);
 const id = crypto.randomUUID();
 
-let coordinatorUrl = process.env.COORDINATOR_URL || "ws://localhost:3000";
+let coordinatorUrl = args.coordinator || positionals[1] || process.env.COORDINATOR_URL || "ws://localhost:3000";
 let ws;
 
 // Últimos mensajes con el coordinator, para mostrarlos en el dashboard
