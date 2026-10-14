@@ -1,0 +1,22 @@
+{
+  "name": "ssd-comms-ws",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Template de comunicación entre servidores con WebSockets y HTTP (coordinator + workers)",
+  "scripts": {
+    "start": "concurrently -n coord,worker -c blue,green \"npm:coordinator\" \"npm:worker\"",
+    "dev": "concurrently -n coord,worker -c blue,green \"node --watch coordinator/index.js\" \"node --watch worker/index.js\"",
+    "coordinator": "node coordinator/index.js",
+    "worker": "node worker/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}

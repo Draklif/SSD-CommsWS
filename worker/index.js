@@ -1,108 +1,81 @@
+// Worker: se conecta al coordinator por WebSocket, se registra y envía pulsos.
+// Expone su estado por HTTP.
+//
+// Uso: node worker/index.js [--port 4000] [--coordinator ws://localhost:3000] [--public-url http://localhost:4000]
+
 const express = require("express");
-const cors = require("cors");
-const crypto = require("crypto");
 const WebSocket = require("ws");
+const crypto = require("node:crypto");
+const { parseArgs } = require("node:util");
 
-const app = express();
+const { values: args } = parseArgs({
+    options: {
+        port: { type: "string", default: "4000" },
+        coordinator: { type: "string", default: "ws://localhost:3000" },
+        "public-url": { type: "string" },
+    },
+});
 
-const PORT = process.argv[2] || 4000;
-const PUBLIC_URL = process.argv[4];
+const PORT = Number(args.port);
+const PUBLIC_URL = args["public-url"] || `http://localhost:${PORT}`;
 const PULSE_INTERVAL = 2000;
-let coordinatorUrl = process.argv[3];
-
-if (!coordinatorUrl || !PUBLIC_URL) {
-    console.error("Usage: node index.js <PORT> <COORDINATOR_WS_URL> <PUBLIC_URL>");
-    process.exit(1);
-}
-
+const RECONNECT_DELAY = 3000;
 const id = crypto.randomUUID();
 
-app.use(cors());
-app.use(express.json());
-
+let coordinatorUrl = args.coordinator;
 let ws;
 
+// ---------- WebSocket ----------
 function connect() {
     console.log(`Conectando a coordinator ${coordinatorUrl}`);
-
     ws = new WebSocket(coordinatorUrl);
 
     ws.on("open", () => {
         console.log("Conectado al coordinator");
-        register();
-        setInterval(sendPulse, PULSE_INTERVAL);
+        send("register", { id, url: PUBLIC_URL });
     });
 
-    ws.on("message", (msg) => {
-        const data = JSON.parse(msg);
-        console.log("Coordinator dice:", data);
+    ws.on("message", (raw) => {
+        const msg = JSON.parse(raw);
+        if (msg.type !== "pulse_received") console.log("Coordinator dice:", msg);
     });
 
+    // Si se cae la conexión (o el coordinator aún no arranca), reintenta
     ws.on("close", () => {
-        console.log("Conexion cerrada con coordinator");
+        console.log(`Conexión cerrada, reintentando en ${RECONNECT_DELAY / 1000}s`);
+        setTimeout(connect, RECONNECT_DELAY);
     });
 
-    ws.on("error", (err) => {
-        console.error("Error WS:", err.message);
-    });
+    ws.on("error", (err) => console.error("Error WS:", err.message || err.code));
 }
 
-function register() {
-    if (ws.readyState !== WebSocket.OPEN) return;
-
-    ws.send(JSON.stringify({
-        type: "register",
-        id,
-        url: PUBLIC_URL
-    }));
-
-    console.log(`Registrado en ${coordinatorUrl}`);
+// Todos los mensajes tienen la forma { type, data }
+function send(type, data) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, data }));
 }
 
-function sendPulse() {
-    if (ws.readyState !== WebSocket.OPEN) return;
+setInterval(() => send("pulse", { id }), PULSE_INTERVAL);
 
-    ws.send(JSON.stringify({
-        type: "pulse",
-        id
-    }));
-
-    console.log(`Pulse enviado a ${coordinatorUrl}`);
-}
+// ---------- HTTP ----------
+const app = express();
+app.use(express.json());
 
 app.get("/status", (req, res) => {
-    res.json({
-        id,
-        status: "alive",
-        coordinator: coordinatorUrl,
-        timestamp: Date.now()
-    });
+    res.json({ id, status: "alive", coordinator: coordinatorUrl, timestamp: Date.now() });
 });
 
-app.post("/change-coordinator", async (req, res) => {
-    const { newCoordinatorUrl } = req.body;
-
-    if (!newCoordinatorUrl) {
-        return res.status(400).json({ error: "new coordinator url is required" });
-    }
+app.post("/change-coordinator", (req, res) => {
+    const { newCoordinatorUrl } = req.body || {};
+    if (!newCoordinatorUrl) return res.status(400).json({ error: "newCoordinatorUrl is required" });
 
     console.log(`Cambiando coordinator de ${coordinatorUrl} a ${newCoordinatorUrl}`);
-
     coordinatorUrl = newCoordinatorUrl;
+    ws.close(); // el handler de "close" reconecta a la nueva URL
 
-    if (ws) {
-        ws.close();
-    }
-
-    connect();
-
-    res.json({
-        message: "Coordinator cambiado correctamente",
-        currentCoordinator: coordinatorUrl
-    });
+    res.json({ message: "Coordinator cambiado", currentCoordinator: coordinatorUrl });
 });
 
 app.listen(PORT, () => {
-    console.log(`Worker ${id} corriendo en puerto ${PORT}`);
+    console.log(`Worker ${id} en http://localhost:${PORT}`);
     connect();
 });

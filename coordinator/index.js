@@ -1,163 +1,95 @@
-const WebSocket = require("ws");
-const fs = require("fs");
-const http = require("http");
+// Coordinator: recibe workers por WebSocket y expone su estado por HTTP.
+// HTTP y WebSocket comparten el mismo puerto.
+//
+// Uso: node coordinator/index.js [--port 3000] [--role PRIMARY]
 
-const PORT = process.argv[2] || 3000;
-const TIMEOUT = 5000;
-const ID_PATH = "./id";
-const ID = getOrCreateId();
+const express = require("express");
+const { WebSocketServer } = require("ws");
+const { parseArgs } = require("node:util");
 
-const wss = new WebSocket.Server({ port: PORT });
-
-let role = "UNKNOWN";
-let servers = {};
-let totalTimeouts = 0;
-
-console.log(`Coordinator WS corriendo en puerto ${PORT} con ID ${ID}. HTTP en puerto ${Number(PORT)+1000}`);
-
-// Manejo de mensajes
-wss.on("connection", (ws) => {
-
-    ws.on("message", (msg) => {
-
-        let data;
-
-        try {
-            data = JSON.parse(msg);
-        } catch {
-            return ws.send(JSON.stringify({ error: "invalid json" }));
-        }
-
-        handleWorkerMessages(ws, data);
-    });
-
+const { values: args } = parseArgs({
+    options: {
+        port: { type: "string", default: "3000" },
+        role: { type: "string", default: "PRIMARY" },
+    },
 });
 
-// Helpers
-function isPrimary() {
-    return role === "PRIMARY";
-}
+const PORT = Number(args.port);
+const ID = Math.floor(Math.random() * 10000);
+const TIMEOUT = 5000;
 
-function getOrCreateId() {
-    if (!fs.existsSync(ID_PATH)) {
-        const id = Math.floor(Math.random() * 10000);
-        fs.writeFileSync(ID_PATH, String(id));
-        return id;
-    }
+let role = args.role;
+const servers = {}; // id -> { id, url, lastHeartbeat }
+let totalTimeouts = 0;
 
-    return Number(fs.readFileSync(ID_PATH, "utf-8").trim());
-}
+// ---------- HTTP ----------
+const app = express();
+app.use(express.json());
 
-// Handlers
-// Mensajes de workers
-function handleWorkerMessages(ws, data) {
-    switch (data.type) {
-        case "register":
-            handleRegister(ws, data);
-            break;
+app.get("/status", (req, res) => {
+    res.json({ id: ID, role, servers: Object.values(servers), totalTimeouts });
+});
 
-        case "pulse":
-            handlePulse(ws, data);
-            break;
+const server = app.listen(PORT, () => {
+    console.log(`Coordinator ${ID} (${role}) en http://localhost:${PORT} y ws://localhost:${PORT}`);
+});
 
-        case "get_servers":
-            handleGetServers(ws);
-            break;
+// ---------- WebSocket ----------
+const wss = new WebSocketServer({ server });
 
-        case "get_metrics":
-            handleGetMetrics(ws);
-            break;
-    }
-}
-
-// Registrar
-function handleRegister(ws, data) {
-    const { id, url } = data;
-
-    if (!isPrimary()) {
-        return ws.send(JSON.stringify({
-            type: "error",
-            data: { message: "server not primary" }
-        }));
-    }
-
-    if (!id || !url) {
-        return ws.send(JSON.stringify({
-            type: "error",
-            data: { message: "id and url required" }
-        }));
-    }
-
-    servers[id] = {
-        id,
-        url,
-        lastHeartbeat: Date.now()
-    };
-
-    console.log(`Servidor registrado: ${id} -> ${url}`);
-
-    ws.send(JSON.stringify({
-        type: "registered",
-        id
-    }));
-}
-
-// Recibir pulso
-function handlePulse(ws, data) {
-    const { id } = data;
-
-    if (!isPrimary()) {
-        return ws.send(JSON.stringify({
-            type: "error",
-            data: { message: "server not primary" }
-        }));
-    }
-
-    if (!servers[id]) {
-        return ws.send(JSON.stringify({
-            type: "error",
-            data: { message: "server not registered" }
-        }));
-    }
-
-    servers[id].lastHeartbeat = Date.now();
-
-    ws.send(JSON.stringify({
-        type: "pulse_received",
-        data: { id } 
-    }));
-}
-
-// Lista de servidores
-function handleGetServers(ws) {
-    const now = Date.now();
-
-    const activeServers = Object.values(servers).filter(
-        server => now - server.lastHeartbeat <= TIMEOUT
-    );
-
-    ws.send(JSON.stringify({
-        type: "servers",
-        data: { activeServers }
-    }));
-}
-
-// Métricas
-function handleGetMetrics(ws) {
-    ws.send(JSON.stringify({
-        type: "metrics",
-        data: {
-            totalServersTracked: Object.keys(servers).length,
-            totalTimeouts
+wss.on("connection", (ws) => {
+    ws.on("message", (raw) => {
+        let msg;
+        try {
+            msg = JSON.parse(raw);
+        } catch {
+            return send(ws, "error", { message: "invalid json" });
         }
-    }));
+
+        const handler = handlers[msg.type];
+        if (!handler) return send(ws, "error", { message: `unknown type: ${msg.type}` });
+
+        handler(ws, msg.data || {});
+    });
+});
+
+// Todos los mensajes tienen la forma { type, data }
+function send(ws, type, data = {}) {
+    ws.send(JSON.stringify({ type, data }));
 }
 
-// Timeout de workers
+const handlers = {
+    register(ws, { id, url }) {
+        if (role !== "PRIMARY") return send(ws, "error", { message: "server not primary" });
+        if (!id || !url) return send(ws, "error", { message: "id and url required" });
+
+        servers[id] = { id, url, lastHeartbeat: Date.now() };
+        console.log(`Servidor registrado: ${id} -> ${url}`);
+        send(ws, "registered", { id });
+    },
+
+    pulse(ws, { id }) {
+        if (role !== "PRIMARY") return send(ws, "error", { message: "server not primary" });
+        if (!servers[id]) return send(ws, "error", { message: "server not registered" });
+
+        servers[id].lastHeartbeat = Date.now();
+        send(ws, "pulse_received", { id });
+    },
+
+    get_servers(ws) {
+        send(ws, "servers", { activeServers: Object.values(servers) });
+    },
+
+    get_metrics(ws) {
+        send(ws, "metrics", { totalServersTracked: Object.keys(servers).length, totalTimeouts });
+    },
+};
+
+// Elimina workers que dejaron de enviar pulsos
 setInterval(() => {
     const now = Date.now();
 
-    for (let id in servers) {
+    for (const id in servers) {
         if (now - servers[id].lastHeartbeat > TIMEOUT) {
             console.log(`Servidor eliminado por timeout: ${id}`);
             delete servers[id];
@@ -165,28 +97,3 @@ setInterval(() => {
         }
     }
 }, 2000);
-
-// Server HTTP para peticiones internas
-const server = http.createServer((req, res) => {
-    // POST: /add-peer
-    if (req.method === "POST" && req.url === "/add-peer") {
-        return;
-    }
-
-    res.writeHead(404);
-    res.end();
-});
-
-server.listen(String(Number(PORT)+1000));
-
-// DEBUG
-const DEBUG_INTERVAL = 5000;
-
-function debugState() {
-    console.log({
-        ID,
-        role
-    });
-}
-
-setInterval(debugState, DEBUG_INTERVAL);
